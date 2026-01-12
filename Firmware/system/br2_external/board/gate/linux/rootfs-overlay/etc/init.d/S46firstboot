@@ -1,0 +1,73 @@
+#!/bin/sh
+#
+# First boot script for maximizing SD card available space
+#
+
+FLAGFILE="/etc/.firstboot_done"
+if [ -f "$FLAGFILE" ]; then
+    exit 0
+fi
+
+echo "First boot: expanding /mnt/rns to full SD card..."
+
+MOUNTPOINT="/mnt/rns"
+
+# Detect the device backing the mountpoint
+DEV=$(awk "\$2==\"$MOUNTPOINT\" {print \$1}" /proc/mounts)
+if [ -z "$DEV" ]; then
+    echo "Error: could not detect device for $MOUNTPOINT"
+    exit 1
+fi
+
+echo "Device detected: $DEV"
+
+# Unmount the filesystem
+echo "Unmounting $MOUNTPOINT..."
+umount "$MOUNTPOINT" || { echo "Failed to unmount $MOUNTPOINT"; exit 1; }
+
+# Determine disk and partition number
+if echo "$DEV" | grep -q "mmcblk"; then
+    DISK=$(echo $DEV | sed 's/p[0-9]*$//')
+    PARTNUM=$(echo $DEV | grep -o '[0-9]*$')
+else
+    DISK=$(echo $DEV | sed 's/[0-9]*$//')
+    PARTNUM=$(echo $DEV | grep -o '[0-9]*$')
+fi
+
+echo "Disk: $DISK"
+echo "Partition number: $PARTNUM"
+
+# Get start sector of the partition
+START=$(sgdisk -i $PARTNUM $DISK | awk '/First sector/ {print $3}')
+if [ -z "$START" ]; then
+    echo "Error: could not detect start sector of partition $PARTNUM"
+    exit 1
+fi
+
+echo "Start sector of partition: $START"
+
+# Delete and recreate partition to fill the disk, suppressing warnings
+sgdisk -d $PARTNUM $DISK 2>/dev/null 2>&1
+sgdisk -n $PARTNUM:$START:0 $DISK 2>/dev/null 2>&1
+
+# Inform kernel quietly
+partprobe $DISK >/dev/null 2>&1
+
+# Check filesystem
+echo "Checking filesystem..."
+e2fsck -f $DEV
+
+# Resize filesystem
+echo "Resizing filesystem..."
+resize2fs $DEV
+
+# Remount
+echo "Remounting $MOUNTPOINT..."
+mount $DEV $MOUNTPOINT
+
+echo "Resize complete."
+
+# Mark done by creating a flag file
+touch "$FLAGFILE"
+
+echo "Firstboot script finished."

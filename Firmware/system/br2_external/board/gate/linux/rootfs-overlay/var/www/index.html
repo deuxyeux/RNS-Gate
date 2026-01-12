@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>RNS-Gate Config Editor</title>
+<style>
+body {
+    margin: 0;
+    font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+    background: #111;
+    color: #eee;
+}
+
+#login-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.85);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+}
+
+#login-box {
+    background: #222;
+    padding: 30px 25px;
+    border-radius: 10px;
+    box-shadow: 0 0 30px rgba(0,0,0,0.7);
+    width: 280px;
+    text-align: center;
+}
+
+#login-box h2 {
+    margin: 0 0 15px 0;
+    font-weight: normal;
+    color: #f0f0f0;
+}
+
+#login-box input {
+    width: 100%;
+    padding: 8px 10px;
+    margin-top: 10px;
+    background: #333;
+    color: #fff;
+    border: 1px solid #555;
+    border-radius: 4px;
+    font-size: 14px;
+    box-sizing: border-box;
+}
+
+#login-box button {
+    margin-top: 15px;
+    width: 100%;
+    padding: 8px 10px;
+    background: #4a90e2;
+    color: #fff;
+    border: none;
+    border-radius: 4px;
+    font-size: 14px;
+    cursor: pointer;
+    transition: background 0.2s;
+}
+
+#login-box button:hover {
+    background: #357ab8;
+}
+
+#toolbar {
+    height: 40px;
+    background: #222;
+    display: flex;
+    align-items: center;
+    padding: 0 10px;
+}
+
+button, select {
+    margin-left: 10px;
+    background: #444;
+    color: #fff;
+    border: none;
+    padding: 5px 10px;
+    border-radius: 4px;
+    cursor: pointer;
+}
+
+button:hover, select:hover {
+    background: #555;
+}
+
+#editor {
+    position: absolute;
+    top: 40px;
+    bottom: 0;
+    left: 0;
+    right: 0;
+}
+
+#status {
+    margin-left: 20px;
+}
+</style>
+</head>
+<body>
+
+<div id="login-overlay">
+    <div id="login-box">
+        <h2>RNS-Gate Config Editor</h2>
+        <input id="password" type="password" placeholder="Enter password" autofocus>
+        <button onclick="doLogin()">Login</button>
+    </div>
+</div>
+
+<div id="toolbar" style="display:none;">
+    File:
+    <select id="file">
+        <option value="/mnt/rns/.reticulum/config">Reticulum</option>
+        <option value="/mnt/rns/.nomadnetwork/config">Nomadnet</option>
+        <option value="/mnt/rns/rnode.yaml">RNode</option>
+    </select>
+    <button onclick="loadFile()">Load</button>
+    <button onclick="save(false)">Save</button>
+    <button onclick="save(true)">Save & Restart RNS</button>
+    <span id="status"></span>
+</div>
+
+<div id="editor" style="display:none;"></div>
+
+<script src="/editor/ace.js"></script>
+<script>
+let editor;
+
+async function doLogin() {
+    const pw = document.getElementById("password").value;
+    if (!pw) return;
+
+    const r = await fetch("/cgi-bin/editor.py?action=login", {
+        method: "POST",
+        body: pw
+    });
+
+    if (r.ok) {
+        document.getElementById("login-overlay").style.display = "none";
+        initEditor();
+    } else {
+        alert("Authentication failed");
+        document.getElementById("password").value = "";
+    }
+}
+
+document.getElementById("password").addEventListener("keydown", e => {
+    if (e.key === "Enter") doLogin();
+});
+
+function initEditor() {
+    document.getElementById("toolbar").style.display = "flex";
+    document.getElementById("editor").style.display = "block";
+
+    editor = ace.edit("editor");
+    editor.setTheme("ace/theme/monokai");
+    editor.session.setMode("ace/mode/yaml");
+    editor.setOptions({
+        fontSize: "14pt",
+        showPrintMargin: false
+    });
+
+    loadFile();
+}
+
+async function loadFile() {
+    const file = document.getElementById("file").value;
+    document.getElementById("status").textContent = "Loading...";
+    const r = await fetch("/cgi-bin/editor.py?path=" + encodeURIComponent(file));
+    editor.setValue(await r.text(), -1);
+    document.getElementById("status").textContent = "Config File Loaded";
+}
+
+async function save(restart) {
+    const file = document.getElementById("file").value;
+    document.getElementById("status").textContent = "Saving...";
+    const r = await fetch(
+        "/cgi-bin/editor.py?path=" + encodeURIComponent(file) + "&restart=" + (restart ? "1" : "0"),
+        { method: "POST", body: editor.getValue() }
+    );
+    document.getElementById("status").textContent = await r.text();
+}
+</script>
+
+</body>
+</html>
