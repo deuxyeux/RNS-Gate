@@ -67,6 +67,18 @@ mount $DEV $MOUNTPOINT
 
 echo "Resize complete."
 
+# Chown /var/www to www-data:www-data
+echo "Changing owner of /var/www to www-data:www-data..."
+chown -R www-data:www-data /var/www
+
+# Chown /mnt/rns to rns:rns
+echo "Changing owner of /mnt/rns to rns:rns..."
+chown -R rns:rns /mnt/rns
+
+# Chown /mnt/rns/rnode.yaml
+echo "Changing owner of /mnt/rns/rnode.yaml to root:root..."
+chown root:root /mnt/rns/rnode.yaml
+
 # Mark done by creating a flag file
 touch "$FLAGFILE"
 

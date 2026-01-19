@@ -1,0 +1,200 @@
+#!/usr/bin/env python3
+import sys
+import os
+import json
+import urllib.parse
+import socket
+import re
+
+SOCKET_PATH = "/tmp/config-updater.sock"
+CONFIG_FILE = "/mnt/rns/.reticulum/config"
+
+# ----------------------
+# Logging
+# ----------------------
+def log(msg):
+    now = __import__('datetime').datetime.now().isoformat()
+    print(f"[{now}] {msg}", file=sys.stderr)
+    sys.stderr.flush()
+
+# ----------------------
+# JSON response
+# ----------------------
+def respond(status="200 OK", payload=None):
+    if payload is None:
+        payload = {}
+    body = json.dumps(payload)
+    sys.stdout.write(f"Status: {status}\r\n")
+    sys.stdout.write("Content-Type: application/json\r\n")
+    sys.stdout.write("Cache-Control: no-cache\r\n")
+    sys.stdout.write("\r\n")
+    sys.stdout.write(body)
+
+# ----------------------
+# Type and key mapping for frontend
+# ----------------------
+TYPE_MAP = {
+    "AutoInterface": "autointerface",
+    "TCPClientInterface": "tcp_client",
+    "TCPServerInterface": "tcp_server",
+    "RNodeInterface": "rnode",
+    "FreeDVInterface": "freedv",
+    "LoRaSPIInterface": "loraspi"
+}
+
+KEY_MAP = {
+    "listen_ip": "bind_host",
+    "listen_port": "port",
+    "target_host": "host",
+    "target_port": "port",
+    "interface_enabled": "enabled",
+    "enabled": "enabled",
+    "frequency": "frequency",
+    "port": "serial",
+    "txpower": "tx_power",
+    "spreadingfactor": "spread_factor",
+    "codingrate": "coding_rate",
+    "bandwidth": "bandwidth",
+    "selected_interface_mode": "mode",
+    "configured_bitrate": "bitrate"
+}
+
+def normalize_value(val):
+    val_lower = str(val).lower()
+    if val_lower in ("yes", "true"):
+        return True
+    elif val_lower in ("no", "false"):
+        return False
+    elif val_lower in ("none", "null"):
+        return None
+    else:
+        try:
+            if '.' in val:
+                return float(val)
+            else:
+                return int(val)
+        except ValueError:
+            return val.strip('"').strip("'")
+
+# ----------------------
+# Parse interfaces from RNS config
+# ----------------------
+def parse_interfaces():
+    interfaces = []
+    current_iface = None
+
+    section_re = re.compile(r'^\[\[(.+?)\]\]')
+    kv_re = re.compile(r'^(\w+)\s*=\s*(.+)$')
+
+    try:
+        with open(CONFIG_FILE) as f:
+            in_interfaces_section = False
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+
+                if line.lower() == "[interfaces]":
+                    in_interfaces_section = True
+                    continue
+
+                if not in_interfaces_section:
+                    continue
+
+                m = section_re.match(line)
+                if m:
+                    if current_iface:
+                        interfaces.append(current_iface)
+                    name = m.group(1)
+                    current_iface = {"id": name, "name": name, "type": "", "settings": {}}
+                    continue
+
+                m = kv_re.match(line)
+                if m and current_iface:
+                    key, val = m.group(1), m.group(2).strip()
+                    val = normalize_value(val)
+
+                    if key.lower() == "type":
+                        current_iface["type"] = TYPE_MAP.get(val, "tcp_client")
+                    else:
+                        mapped_key = KEY_MAP.get(key, key)
+
+                        # Convert bandwidth from Hz -> kHz and round to integer
+                        if mapped_key == "bandwidth" and isinstance(val, (int, float)):
+                            val = round(val / 1000)  # 250000 Hz -> 250 kHz
+
+                        current_iface["settings"][mapped_key] = val
+
+        if current_iface:
+            interfaces.append(current_iface)
+
+        return interfaces
+    except Exception as e:
+        raise RuntimeError(f"Failed to parse config: {e}")
+
+# ----------------------
+# Send payload to config-updater via UNIX socket
+# ----------------------
+def send_to_updater(payload):
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.connect(SOCKET_PATH)
+            s.sendall(json.dumps(payload).encode("utf-8"))
+            data = s.recv(65536)
+            return json.loads(data.decode("utf-8"))
+    except Exception as e:
+        return {"status":"error","message":str(e)}
+
+# ----------------------
+# Main CGI logic
+# ----------------------
+def main():
+    try:
+        path_info = os.environ.get("PATH_INFO", "/info").lower()
+        method = os.environ.get("REQUEST_METHOD", "GET").upper()
+
+        # ------------------- /info -------------------
+        if path_info.endswith("/info") and method == "GET":
+            data = parse_interfaces()
+            respond("200 OK", data)
+            return
+
+        # ------------------- /apply -------------------
+        elif path_info.endswith("/apply") and method == "POST":
+            length = int(os.environ.get("CONTENT_LENGTH", 0))
+            raw_post = sys.stdin.read(length)
+            log(f"RAW POST DATA:\n{raw_post}")
+
+            form = urllib.parse.parse_qs(raw_post)
+            if "payload" not in form:
+                respond("400 Bad Request", {"message": "Missing 'payload'"})
+                return
+
+            payload_json = form["payload"][0]
+            try:
+                payload = json.loads(payload_json)
+            except Exception as e:
+                log(f"JSON DECODE ERROR: {e}")
+                respond("400 Bad Request", {"message": f"Invalid JSON: {e}"})
+                return
+
+            log(f"PARSED PAYLOAD:\n{json.dumps(payload, indent=2)}")
+
+            # Send to updater
+            reply = send_to_updater({
+                "action": "apply_rns",
+                "config": payload
+            })
+            respond("200 OK", reply)
+            return
+
+        # ------------------- Unknown endpoint -------------------
+        else:
+            respond("404 Not Found", {"message": "Unknown endpoint"})
+            return
+
+    except Exception as e:
+        respond("500 Internal Server Error", {"message": str(e)})
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,181 @@
+#!/usr/bin/env python3
+import os
+import sys
+import json
+import crypt
+import uuid
+from urllib.parse import parse_qs
+
+BASE = "/var/www/cgi-bin"
+USERS_FILE = os.path.join(BASE, "user.db")
+SESSIONS_FILE = os.path.join(BASE, "session.db")
+
+# -------------------- helpers --------------------
+def respond(obj, code=200, set_cookie=None):
+    print(f"Status: {code}")
+    print("Content-Type: application/json")
+    if set_cookie:
+        print(f"Set-Cookie: {set_cookie}; Path=/; HttpOnly")
+    print()
+    print(json.dumps(obj))
+    sys.exit(0)
+
+def load_users():
+    users = {}
+    if os.path.exists(USERS_FILE):
+        with open(USERS_FILE) as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                u, p, a = line.strip().split(":")
+                users[u] = {"pass": p, "is_admin": a == "1"}
+    return users
+
+def save_users(users):
+    with open(USERS_FILE, "w") as f:
+        for u, info in users.items():
+            f.write(f"{u}:{info['pass']}:{1 if info['is_admin'] else 0}\n")
+
+def load_sessions():
+    sessions = {}
+    if os.path.exists(SESSIONS_FILE):
+        with open(SESSIONS_FILE) as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                sid, user = line.strip().split(":")
+                sessions[sid] = user
+    return sessions
+
+def save_sessions(sessions):
+    with open(SESSIONS_FILE, "w") as f:
+        for sid, user in sessions.items():
+            f.write(f"{sid}:{user}\n")
+
+def get_session_user():
+    cookie = os.environ.get("HTTP_COOKIE", "")
+    for part in cookie.split(";"):
+        part = part.strip()
+        if part.startswith("SESSION="):
+            sid = part.split("=", 1)[1]
+            return load_sessions().get(sid)
+    return None
+
+def is_admin(username, users):
+    return username in users and users[username]["is_admin"]
+
+def parse_post_data():
+    try:
+        size = int(os.environ.get("CONTENT_LENGTH", 0))
+    except ValueError:
+        size = 0
+    data = parse_qs(sys.stdin.read(size))
+    # unwrap lists
+    return {k: v[0] for k, v in data.items()}
+
+# -------------------- main --------------------
+path = os.environ.get("PATH_INFO", "")
+
+users = load_users()
+sessions = load_sessions()
+current_user = get_session_user()
+
+# -------------------- REGISTER --------------------
+if path == "/register":
+    if os.environ.get("REQUEST_METHOD", "") != "POST":
+        respond({"error": "POST required"}, 405)
+
+    data = parse_post_data()
+    username = data.get("username", "").strip()
+    password = data.get("password", "").strip()
+
+    if not username or not password:
+        respond({"error": "username and password required"}, 400)
+
+    # first user special case
+    if not users:
+        pass  # allow registration
+    else:
+        # must be admin to add users
+        if not current_user or not is_admin(current_user, users):
+            respond({"error": "forbidden"}, 403)
+
+    if username in users:
+        respond({"error": "user already exists"}, 409)
+
+    hashed = crypt.crypt(password, crypt.mksalt(crypt.METHOD_SHA512))
+    is_admin_flag = 1 if not users else 0
+    users[username] = {"pass": hashed, "is_admin": bool(is_admin_flag)}
+    save_users(users)
+    respond({"username": username, "is_admin": bool(is_admin_flag)})
+
+# -------------------- LOGIN --------------------
+elif path == "/login":
+    if os.environ.get("REQUEST_METHOD", "") != "POST":
+        respond({"error": "POST required"}, 405)
+
+    data = parse_post_data()
+    username = data.get("username", "").strip()
+    password = data.get("password", "").strip()
+
+    if username not in users:
+        respond({"error": "invalid username or password"}, 401)
+
+    hashed = users[username]["pass"]
+    if crypt.crypt(password, hashed) != hashed:
+        respond({"error": "invalid username or password"}, 401)
+
+    # create session
+    sid = str(uuid.uuid4())
+    sessions[sid] = username
+    save_sessions(sessions)
+    respond({"username": username, "is_admin": users[username]["is_admin"]}, set_cookie=f"SESSION={sid}")
+
+# -------------------- STATUS --------------------
+elif path == "/status":
+    if current_user and current_user in users:
+        respond({
+            "authenticated": True,
+            "username": current_user,
+            "is_admin": users[current_user]["is_admin"],
+            "no_users": len(users) == 0
+        })
+    else:
+        respond({
+            "authenticated": False,
+            "no_users": len(users) == 0
+        })
+
+# -------------------- DELETE --------------------
+elif path == "/delete":
+    if os.environ.get("REQUEST_METHOD", "") != "POST":
+        respond({"error": "POST required"}, 405)
+
+    if not current_user or not is_admin(current_user, users):
+        respond({"error": "forbidden"}, 403)
+
+    data = parse_post_data()
+    username_to_delete = data.get("username", "").strip()
+
+    if not username_to_delete:
+        respond({"error": "username required"}, 400)
+
+    if username_to_delete not in users:
+        respond({"error": "user not found"}, 404)
+
+    if username_to_delete == current_user:
+        respond({"error": "cannot delete self"}, 400)
+
+    # Remove user
+    del users[username_to_delete]
+    save_users(users)
+
+    # Remove any sessions for that user
+    sessions = {sid: user for sid, user in sessions.items() if user != username_to_delete}
+    save_sessions(sessions)
+
+    respond({"ok": True})
+
+# -------------------- INVALID --------------------
+else:
+    respond({"error": "invalid endpoint"}, 404)

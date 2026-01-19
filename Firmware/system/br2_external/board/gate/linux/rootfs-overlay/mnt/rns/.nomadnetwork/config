@@ -1,0 +1,45 @@
+############################################
+### RNS-Gate Nomadnet Configuration File ###
+############################################
+
+[logging]
+loglevel = 3
+destination = file
+
+[client]
+enable_client = no
+user_interface = text
+downloads_path = ~/Downloads
+notify_on_new_message = no
+announce_at_start = no
+try_propagation_on_send_fail = no
+periodic_lxmf_sync = no
+lxmf_sync_interval = 360
+lxmf_sync_limit = 8
+required_stamp_cost = None
+accept_invalid_stamps = False
+max_accepted_size = 500
+compact_announce_stream = yes
+
+[textui]
+intro_time = 0
+theme = dark
+colormode = monochrome
+glyphs = plain
+mouse_enabled = False
+editor = nano
+hide_guide = yes
+
+[node]
+enable_node = yes
+node_name = RNS-Gate de R1CBU
+announce_interval = 60
+announce_at_start = Yes
+disable_propagation = Yes
+propagation_cost = 16
+max_transfer_size = 256
+max_sync_size = 10240
+
+[printing]
+print_messages = No
+print_command = lp

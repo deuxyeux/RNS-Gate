@@ -1,0 +1,26 @@
+#!/bin/sh
+# Populate /etc/resolv.conf from dns-nameservers in /etc/network/interfaces
+# Only for static interfaces
+
+INTERFACES_FILE="/etc/network/interfaces"
+RESOLV_CONF="/etc/resolv.conf"
+
+[ -z "$IFACE" ] && exit 0
+
+# Get method
+method=$(awk '/^iface / {iface=$2; method=$4} iface=="'"$IFACE"'" {print method; exit}' "$INTERFACES_FILE")
+[ "$method" != "static" ] && exit 0
+
+# Collect DNS servers
+dns_list=$(awk '/^iface / {iface=$2} iface=="'"$IFACE"'" && $1=="dns-nameservers" {for (i=2;i<=NF;i++) print $i}' "$INTERFACES_FILE")
+
+# Preserve search line
+search_line=$(grep '^search ' "$RESOLV_CONF" 2>/dev/null)
+
+# Write resolv.conf
+{
+  [ -n "$search_line" ] && echo "$search_line"
+  for dns in $dns_list; do
+    echo "nameserver $dns"
+  done
+} > "$RESOLV_CONF"

@@ -9,6 +9,12 @@ PIDFILE="/var/run/$NAME.pid"
 [ -r /etc/default/rns ] && . /etc/default/rns
 
 start() {
+	LOGFILE="/mnt/rns/.nomadnetwork/logfile"
+	TEMPLOG="/var/log/nomadnet.log"
+	ln -sf "$TEMPLOG" "$LOGFILE"
+	touch "$TEMPLOG"
+	chown rns:rns "$TEMPLOG"
+
 	printf "Starting $NAME: "
 	start-stop-daemon -S -q -b -m -p $PIDFILE -c rns -x $DAEMON -- --config $NOMADNET_CONFIG --rnsconfig $RETICULUM_CONFIG --daemon
 	echo "OK"

@@ -6,13 +6,13 @@
 source /etc/profile
 
 start() {
-    printf "Restore alsa"
-    alsactl restore
+    printf "Restore alsa: "
+    alsactl --no-ucm restore
     echo "OK"
 }
 
 stop() {
-    printf "Store alsa"
+    printf "Store alsa: "
 #   alsactl store
     echo "OK"
 }

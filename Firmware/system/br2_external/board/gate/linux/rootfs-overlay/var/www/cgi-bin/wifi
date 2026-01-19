@@ -1,0 +1,260 @@
+#!/usr/bin/env python3
+import sys
+import os
+import json
+import socket
+import fcntl
+import struct
+import re
+import urllib.parse
+
+# --- Config --- #
+SOCKET_PATH = "/tmp/config-updater.sock"
+WIFI_INTERFACE = "wlan0"
+INTERFACES_FILE = "/etc/network/interfaces"
+WPA_SUPPLICANT_FILE = "/etc/wpa_supplicant.conf"
+
+# --- Helpers --- #
+def respond(status="200 OK", payload=None):
+    if payload is None:
+        payload = {}
+    body = json.dumps(payload)
+    sys.stdout.write(f"Status: {status}\r\n")
+    sys.stdout.write("Content-Type: application/json\r\n")
+    sys.stdout.write("Cache-Control: no-cache\r\n")
+    sys.stdout.write("\r\n")
+    sys.stdout.write(body)
+
+def parse_post():
+    length = int(os.environ.get("CONTENT_LENGTH", 0))
+    raw = sys.stdin.read(length) if length > 0 else ""
+    return dict(urllib.parse.parse_qsl(raw))
+
+# --- Network info helpers --- #
+def parse_interfaces_method(ifname):
+    method = "dhcp"
+    try:
+        with open(INTERFACES_FILE) as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("#") or not line:
+                    continue
+                m = re.match(rf"iface\s+{re.escape(ifname)}\s+inet\s+(\w+)", line)
+                if m:
+                    method = m.group(1).lower()
+                    break
+    except Exception:
+        method = "None"
+    return method if method else "None"
+
+def get_ip_netmask_broadcast(ifname):
+    ip = netmask = broadcast = None
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        ip = socket.inet_ntoa(fcntl.ioctl(
+            s.fileno(),
+            0x8915,  # SIOCGIFADDR
+            struct.pack('256s', ifname.encode('utf-8')[:15])
+        )[20:24])
+        netmask = socket.inet_ntoa(fcntl.ioctl(
+            s.fileno(),
+            0x891b,  # SIOCGIFNETMASK
+            struct.pack('256s', ifname.encode('utf-8')[:15])
+        )[20:24])
+        broadcast = socket.inet_ntoa(fcntl.ioctl(
+            s.fileno(),
+            0x8919,  # SIOCGIFBRDADDR
+            struct.pack('256s', ifname.encode('utf-8')[:15])
+        )[20:24])
+    except Exception:
+        pass
+    return ip, netmask, broadcast
+
+def get_configured_gateway(ifname):
+    gw = None
+    try:
+        iface_section = False
+        with open(INTERFACES_FILE) as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("#") or not line:
+                    continue
+                m_iface = re.match(rf"iface\s+{re.escape(ifname)}\s+inet\s+\w+", line)
+                if m_iface:
+                    iface_section = True
+                    continue
+                if iface_section:
+                    m_gw = re.match(r"gateway\s+(.+)", line)
+                    if m_gw:
+                        gw = m_gw.group(1).strip()
+                        break
+                    if line.startswith("iface "):
+                        break
+    except Exception:
+        pass
+    return gw
+
+def get_default_route_for_interface(ifname):
+    gw = None
+    try:
+        with open("/proc/net/route") as f:
+            for line in f:
+                parts = line.strip().split()
+                if len(parts) < 11 or parts[0] != ifname:
+                    continue
+                dest, gateway_hex, flags = parts[1], parts[2], parts[3]
+                if dest != "00000000" or int(flags, 16) & 2 == 0:
+                    continue
+                gw_int = int(gateway_hex, 16)
+                gw = ".".join(str((gw_int >> (8 * i)) & 0xFF) for i in range(4))
+                break
+    except Exception:
+        pass
+    return gw
+
+def get_dns():
+    dns1 = dns2 = None
+    try:
+        if os.path.exists("/etc/resolv.conf"):
+            dns_list = []
+            with open("/etc/resolv.conf") as f:
+                for line in f:
+                    line = line.split('#')[0].strip()
+                    if line.startswith("nameserver"):
+                        parts = line.split()
+                        if len(parts) >= 2:
+                            dns_list.append(parts[1])
+            if len(dns_list) >= 2:
+                dns1, dns2 = dns_list[0], dns_list[1]
+            elif len(dns_list) == 1:
+                dns1 = dns_list[0]
+    except Exception:
+        pass
+    return dns1, dns2
+
+def get_link_info(ifname):
+    link_up = False
+    speed = 100
+    duplex = "full"
+    try:
+        operstate_path = f"/sys/class/net/{ifname}/operstate"
+        if os.path.exists(operstate_path):
+            with open(operstate_path) as f:
+                link_up = f.read().strip() == "up"
+    except Exception:
+        pass
+    return {"up": link_up, "speed": speed, "duplex": duplex}
+
+def get_wifi_credentials():
+    ssid = None
+    psk = None
+    try:
+        if os.path.exists(WPA_SUPPLICANT_FILE):
+            content = open(WPA_SUPPLICANT_FILE).read()
+            m_ssid = re.search(r'ssid\s*=\s*"([^"]+)"', content)
+            m_psk = re.search(r'psk\s*=\s*"([^"]+)"', content)
+            if m_ssid:
+                ssid = m_ssid.group(1)
+            if m_psk:
+                psk = m_psk.group(1)
+    except Exception:
+        pass
+    return ssid, psk
+
+def detect_mode():
+    ssid, _ = get_wifi_credentials()
+    return "client" if ssid else "ap"
+
+# --- Apply configuration --- #
+def apply_config(form):
+    config = {
+        "ssid": form.get("ssid") or None,
+        "password": form.get("password") or None,
+        "ip_config": form.get("ip_config", "dhcp"),
+        "ip": form.get("ip") or None,
+        "netmask": form.get("netmask") or None,
+        "gateway": form.get("gateway") or None,
+        "broadcast": form.get("broadcast") or None,
+        "dns1": form.get("dns1") or None,
+        "dns2": form.get("dns2") or None
+    }
+
+    # Validation
+    if not config["ssid"] or not config["password"]:
+        respond("400 Bad Request", {"error": "SSID and password required"})
+        return
+
+    if config['ip_config'] == "static":
+        if not config["ip"] or not config["netmask"]:
+            respond("400 Bad Request", {"error": "Static config requires ip and netmask"})
+            return
+
+    payload = {
+        "interface": WIFI_INTERFACE,
+        "action": "apply_wlan",
+        "config": config
+    }
+
+    if not os.path.exists(SOCKET_PATH):
+        respond("500 Internal Server Error", {"error": "apply daemon unreachable"})
+        return
+
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:
+            s.connect(SOCKET_PATH)
+            s.sendall(json.dumps(payload).encode("utf-8"))
+            data = s.recv(65536)
+            result = json.loads(data.decode("utf-8"))
+            if result.get("status") == "ok":
+                respond("200 OK", result)
+            else:
+                respond("500 Internal Server Error", result)
+    except Exception as e:
+        respond("500 Internal Server Error", {"error": str(e)})
+
+# --- Gather info --- #
+def gather_info():
+    ip_config = parse_interfaces_method(WIFI_INTERFACE)
+    ip_addr, netmask, broadcast = get_ip_netmask_broadcast(WIFI_INTERFACE)
+
+    if ip_config == "dhcp":
+        gateway = get_default_route_for_interface(WIFI_INTERFACE)
+    else:
+        gateway = get_configured_gateway(WIFI_INTERFACE)
+
+    dns1, dns2 = get_dns()
+    link = get_link_info(WIFI_INTERFACE)
+    ssid, psk = get_wifi_credentials()
+    mode = detect_mode()
+
+    data = {
+        "mode": mode,
+        "ssid": ssid,
+        "password": psk,
+        "ip_config": ip_config,
+        "ip": ip_addr,
+        "netmask": netmask,
+        "broadcast": broadcast,
+        "gateway": gateway,
+        "dns1": dns1,
+        "dns2": dns2,
+        "link": link
+    }
+    respond("200 OK", data)
+
+# --- Main --- #
+def main():
+    try:
+        path = os.environ.get("PATH_INFO", "/").lower()
+        if path.endswith("/apply"):
+            form = parse_post()
+            apply_config(form)
+        elif path.endswith("/info"):
+            gather_info()
+        else:
+            respond("404 Not Found", {"error": f"Unknown endpoint '{path}'"})
+    except Exception as e:
+        respond("500 Internal Server Error", {"error": str(e)})
+
+if __name__ == "__main__":
+    main()

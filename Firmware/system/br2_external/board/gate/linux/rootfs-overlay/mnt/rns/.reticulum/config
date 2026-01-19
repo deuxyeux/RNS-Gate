@@ -1,0 +1,43 @@
+#############################################
+### RNS-Gate Reticulum Configuration File ###
+#############################################
+
+[reticulum]
+  enable_transport = True
+  share_instance = Yes
+  instance_name = default
+
+[logging]
+  loglevel = 4
+
+[interfaces]
+
+  [[Default Interface]]
+    type = AutoInterface
+    enabled = Yes
+    name = Default Interface
+
+  [[Server]]
+    type = TCPServerInterface
+    enabled = Yes
+    listen_ip = 0.0.0.0
+    listen_port = 4242
+    name = Server
+
+  [[SPB_TCP]]
+    type = TCPClientInterface
+    enabled = Yes
+    target_host = 31.129.33.146
+    target_port = 4242
+    name = SPB_TCP
+
+  [[SPI RNode]]
+    type = RNodeInterface
+    enabled = Yes
+    port = tcp://localhost
+    frequency = 869525000
+    txpower = 19
+    spreadingfactor = 11
+    codingrate = 5
+    bandwidth = 250000
+    name = SPI RNode
